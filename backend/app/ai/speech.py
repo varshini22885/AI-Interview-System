@@ -4,6 +4,7 @@ Implementations must be configured with backend-only credentials. No default
 implementation fabricates transcripts or audio.
 """
 
+import wave
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Protocol
@@ -181,6 +182,30 @@ class NvidiaSpeechToTextProvider:
             self._queue.put(None)
 
 
+# Riva LINEAR_PCM is raw 16-bit signed little-endian mono PCM (NVIDIA TTS tutorials
+# decode with numpy int16). Magpie NIM / this adapter request 22050 Hz; the WAV
+# header must use that same requested rate, not a different hardcoded rate.
+_TTS_LINEAR_PCM_SAMPLE_RATE_HZ = 22050
+_TTS_LINEAR_PCM_CHANNELS = 1
+_TTS_LINEAR_PCM_SAMPLE_WIDTH = 2
+
+
+def _linear_pcm_to_wav(pcm: bytes, *, sample_rate_hz: int, channels: int = 1, sample_width: int = 2) -> bytes:
+    """Wrap NVIDIA LINEAR_PCM samples in a RIFF/WAVE container. Samples are unchanged."""
+    if len(pcm) >= 12 and pcm[:4] == b"RIFF" and pcm[8:12] == b"WAVE":
+        return pcm
+    frame_size = channels * sample_width
+    if frame_size < 1 or len(pcm) % frame_size != 0:
+        raise RuntimeError("NVIDIA TTS LINEAR_PCM payload is not aligned to the PCM frame size")
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as container:
+        container.setnchannels(channels)
+        container.setsampwidth(sample_width)
+        container.setframerate(sample_rate_hz)
+        container.writeframes(pcm)
+    return buffer.getvalue()
+
+
 class NvidiaTextToSpeechProvider:
     """Request-based offline synthesis through the documented Riva client."""
 
@@ -214,15 +239,24 @@ class NvidiaTextToSpeechProvider:
         auth = self._auth()
         service = riva.client.SpeechSynthesisService(auth)
         encoding = AudioEncoding.OGGOPUS if audio_format == "ogg_opus" else AudioEncoding.LINEAR_PCM
+        sample_rate_hz = _TTS_LINEAR_PCM_SAMPLE_RATE_HZ
         response = service.synthesize(
             text,
             self.voice,
             self.language_code,
-            sample_rate_hz=22050,
+            sample_rate_hz=sample_rate_hz,
             encoding=encoding,
             custom_dictionary={},
         )
-        return bytes(response.audio)
+        audio = bytes(response.audio)
+        if audio_format == "ogg_opus":
+            return audio
+        return _linear_pcm_to_wav(
+            audio,
+            sample_rate_hz=sample_rate_hz,
+            channels=_TTS_LINEAR_PCM_CHANNELS,
+            sample_width=_TTS_LINEAR_PCM_SAMPLE_WIDTH,
+        )
 
 
 def get_speech_providers():

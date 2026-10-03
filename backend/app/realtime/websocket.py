@@ -148,7 +148,7 @@ async def _send_current_question(websocket: WebSocket, db, interview) -> None:
             _, tts = get_speech_providers()
             audio = await asyncio.to_thread(tts.synthesize, question.question_text, audio_format="wav")
             await _send(websocket, "audio_started", audio_format="wav")
-            await _send(websocket, "audio_chunk", data=base64.b64encode(audio).decode("ascii"))
+            await _send(websocket, "audio_chunk", data=base64.b64encode(audio).decode("ascii"), audio_format="wav")
         except RuntimeError:
             await _send(websocket, "error", code="TTS_UNAVAILABLE", message="Question speech is unavailable.")
 

@@ -60,6 +60,7 @@ export default function useRealtimeSession({ interviewId, enabled, mediaStream, 
   const socketRef = useRef(null);
   const audioElementRef = useRef(null);
   const audioAckRef = useRef(false);
+  const ttsFormatRef = useRef("wav");
   const sttBlockedRef = useRef(false);
   const handlerRef = useRef(onServerEvent);
   handlerRef.current = onServerEvent;
@@ -115,10 +116,11 @@ export default function useRealtimeSession({ interviewId, enabled, mediaStream, 
         if (message.event === "audio_start") audioAckRef.current = true;
         break;
       case "audio_started":
+        ttsFormatRef.current = message.audio_format || "wav";
         setTts({ status: "playing", reason: null });
         break;
       case "audio_chunk":
-        playQuestionAudio(message.data, message.audio_format);
+        playQuestionAudio(message.data, message.audio_format || ttsFormatRef.current);
         break;
       case "error": {
         const code = String(message.code || "");
