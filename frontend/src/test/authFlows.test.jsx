@@ -27,7 +27,7 @@ function shell(initialEntries, routes) {
 }
 
 describe("auth flow + protected routes + resume upload", () => {
-  it("logs in and lands on the resume page", async () => {
+  it("logs in and lands on the dashboard", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -41,12 +41,13 @@ describe("auth flow + protected routes + resume upload", () => {
     );
     shell(["/login"], <>
       <Route path="/login" element={<Login />} />
+      <Route path="/" element={<div><h1>Dashboard</h1></div>} />
       <Route path="/resume" element={<ResumePage />} />
     </>);
     await user.type(screen.getByLabelText(/email/i), "dev@example.com");
     await user.type(screen.getByLabelText(/password/i), "password123");
     await user.click(screen.getByRole("button", { name: /sign in/i }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: /resume & role analysis/i })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: /^dashboard$/i })).toBeInTheDocument());
   });
 
   it("blocks unauthenticated access to protected pages", async () => {
@@ -98,4 +99,41 @@ describe("auth flow + protected routes + resume upload", () => {
     await user.click(screen.getByRole("button", { name: /upload resume/i }));
     await waitFor(() => expect(uploads).toHaveLength(1));
   });
+
+  it("keeps polling after upload until the worker marks the resume Ready", async () => {
+    // Regression: POST /resumes persists status UPLOADED and the Celery worker
+    // later moves the row to PROCESSING -> READY. Polling must therefore also
+    // continue while the row is still UPLOADED, otherwise the "Ready" chip only
+    // appears after a manual browser refresh (observed in the browser E2E run).
+    let listCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const u = String(url);
+        if (u.endsWith("/auth/refresh")) return jsonResponse({ access_token: "tok", expires_in: 900 });
+        if (u.endsWith("/auth/me")) return jsonResponse({ id: "u1", email: "a@b.c", full_name: "Ada", is_active: true });
+        if (u.includes("/resumes")) {
+          listCalls += 1;
+          const status = listCalls === 1 ? "UPLOADED" : "READY";
+          return jsonResponse({
+            items: [{ id: "r1", filename: "cv.pdf", status, created_at: "2026-04-01T00:00:00Z" }],
+            page: 1,
+            page_size: 20,
+            total: 1,
+          });
+        }
+        return jsonResponse({}, { status: 404 });
+      }),
+    );
+    shell(["/resume"], <Route path="/resume" element={<ResumePage />} />);
+
+    // The state the API actually persists on upload is rendered first ...
+    await waitFor(() => expect(screen.getByText(/waiting to be processed/i)).toBeInTheDocument());
+    const chip = () => document.querySelector(".resume-chip")?.textContent?.trim();
+    expect(chip()).toBe("Uploaded");
+
+    // ... and the 3s refetchInterval must flip the chip without any user action.
+    await waitFor(() => expect(chip()).toBe("Ready"), { timeout: 8000 });
+    expect(listCalls).toBeGreaterThan(1);
+  }, 20000);
 });

@@ -6,22 +6,27 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Literal, get_args, get_origin
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from app.auth.service import decode_access_token
 from app.core.config import get_settings
-from app.db.base import SessionLocal
+from app.db.base import get_session_factory
 from app.models.interview import InterviewStatus
 from app.models.realtime import RealtimeInterviewSession
 from app.realtime.schemas import CLIENT_MESSAGES
 
 
 def _parse_message(payload: dict):
+    event_type = payload.get("type")
     for schema in CLIENT_MESSAGES:
-        if payload.get("type") == schema.model_fields["type"].default:
-            return schema.model_validate(payload)
+        annotation = schema.model_fields["type"].annotation
+        if get_origin(annotation) is Literal:
+            valid_types = get_args(annotation)
+            if event_type in valid_types:
+                return schema.model_validate(payload)
     raise ValueError("Unsupported event type")
 
 
@@ -41,7 +46,7 @@ async def handle_connection(websocket: WebSocket, *, interview_id: uuid.UUID, se
         await websocket.close(code=1008, reason="Authentication failed")
         return
 
-    db = SessionLocal()
+    db = get_session_factory()()
     stt = None
     tts = None
     audio_started = None

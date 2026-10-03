@@ -52,4 +52,83 @@ describe("API client error contract", () => {
     expect(me.email).toBe("a@b.c");
     expect(calls.filter((u) => u.endsWith("/auth/refresh"))).toHaveLength(1);
   });
+
+  it("retries a transient refresh failure instead of ending the session", async () => {
+    // Regression: in the browser E2E run the Vite dev proxy answered
+    // POST /auth/refresh with 500 while its upstream socket blipped. The client
+    // treated that as "session over" and logged the user out mid-interview.
+    const calls = [];
+    let refreshCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        calls.push(String(url));
+        if (String(url).endsWith("/auth/refresh")) {
+          refreshCount += 1;
+          if (refreshCount === 1) {
+            return jsonResponse({ error: { code: "INTERNAL_ERROR", message: "Gateway blip." } }, { status: 500 });
+          }
+          return jsonResponse({ access_token: "fresh", expires_in: 900 });
+        }
+        if (calls.filter((u) => u.endsWith("/auth/me")).length === 1) {
+          return jsonResponse({ error: { code: "UNAUTHENTICATED", message: "Expired." } }, { status: 401 });
+        }
+        return jsonResponse({ id: "u1", email: "a@b.c" });
+      }),
+    );
+    const client = await import("../api/client.js");
+    const onUnauthorized = vi.fn();
+    client.setUnauthorizedHandler(onUnauthorized);
+    client.setToken("stale");
+    try {
+      const me = await client.api.get("/auth/me");
+      expect(me.email).toBe("a@b.c");
+      expect(refreshCount).toBe(2);
+      expect(onUnauthorized).not.toHaveBeenCalled();
+    } finally {
+      client.setUnauthorizedHandler(null);
+    }
+  });
+
+  it("keeps the session when the refresh endpoint is unavailable (5xx)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) =>
+        String(url).endsWith("/auth/refresh")
+          ? jsonResponse({ error: { code: "INTERNAL_ERROR", message: "Upstream failed." } }, { status: 503 })
+          : jsonResponse({ error: { code: "UNAUTHENTICATED", message: "Expired." } }, { status: 401 }),
+      ),
+    );
+    const client = await import("../api/client.js");
+    const onUnauthorized = vi.fn();
+    client.setUnauthorizedHandler(onUnauthorized);
+    client.setToken("stale");
+    try {
+      await expect(client.api.get("/interviews/active")).rejects.toMatchObject({ status: 401, code: "UNAUTHENTICATED" });
+      expect(onUnauthorized).not.toHaveBeenCalled();
+    } finally {
+      client.setUnauthorizedHandler(null);
+    }
+  });
+
+  it("ends the session when the refresh token is definitively rejected", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) =>
+        String(url).endsWith("/auth/refresh")
+          ? jsonResponse({ error: { code: "INVALID_REFRESH", message: "Invalid refresh token" } }, { status: 401 })
+          : jsonResponse({ error: { code: "UNAUTHENTICATED", message: "Expired." } }, { status: 401 }),
+      ),
+    );
+    const client = await import("../api/client.js");
+    const onUnauthorized = vi.fn();
+    client.setUnauthorizedHandler(onUnauthorized);
+    client.setToken("stale");
+    try {
+      await expect(client.api.get("/interviews/active")).rejects.toMatchObject({ status: 401 });
+      expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    } finally {
+      client.setUnauthorizedHandler(null);
+    }
+  });
 });

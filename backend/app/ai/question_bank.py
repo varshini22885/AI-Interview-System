@@ -24,19 +24,55 @@ class QuestionBank:
 
     def find_one(self, *, role: str, language: str | None, interview_type: str, difficulty: str, exclude: list[str]) -> QuestionOutput | None:
         excluded = {_norm(q) for q in exclude}
-        role_key = role.strip().lower()
+        raw = str(getattr(interview_type, "value", interview_type) or "MIXED").upper()
+        # Tolerant of legacy py3.10 str(Enum) e.g. 'INTERVIEWTYPE.TECHNICAL'.
+        wanted = raw.rsplit(".", 1)[-1] if "." in raw else raw
+        want_diff = str(getattr(difficulty, "value", difficulty) or "MEDIUM").upper().rsplit(".", 1)[-1] if "." in str(getattr(difficulty, "value", difficulty) or "MEDIUM").upper() else str(getattr(difficulty, "value", difficulty) or "MEDIUM").upper()
+        # MIXED accepts every bank question type; TECHNICAL/BEHAVIORAL filter,
+        # and FOLLOW_UP entries are persistence-only (never generated).
         for entry in self.entries:
-            if interview_type != "MIXED" and entry.question_type != interview_type:
+            qtype = entry.question_type.upper()
+            if qtype == "FOLLOW_UP":
                 continue
-            if entry.difficulty != difficulty:
+            if wanted != "MIXED" and qtype != wanted:
                 continue
-            if language and entry.question_type == "TECHNICAL" and language.lower() not in (entry.skill + " " + entry.category + " " + entry.question_text).lower():
+            if entry.difficulty.upper() != want_diff:
                 continue
-            if "backend" in role_key and entry.question_type == "TECHNICAL" and "backend" not in (entry.skill + " " + entry.category + " " + entry.question_text).lower() and "python" not in (entry.skill + " " + entry.category).lower():
-                if entry.difficulty == "HARD":
-                    pass
-                else:
+            if language and entry.question_type.upper() == "TECHNICAL" and language.lower() not in (entry.skill + " " + entry.category + " " + entry.question_text).lower():
+                continue
+            if _norm(entry.question_text) in excluded:
+                continue
+            return entry
+        # Second pass: relax the language hint so a language-specific request
+        # can never leave the interview stuck in PREPARING with an empty bank.
+        if language:
+            for entry in self.entries:
+                qtype = entry.question_type.upper()
+                if qtype == "FOLLOW_UP":
                     continue
+                if wanted != "MIXED" and qtype != wanted:
+                    continue
+                if entry.difficulty.upper() != want_diff:
+                    continue
+                if _norm(entry.question_text) in excluded:
+                    continue
+                return entry
+        # Final pass: any non-duplicate entry of the right difficulty so the
+        # deterministic safety net always yields a question when non-empty.
+        for entry in self.entries:
+            if entry.question_type.upper() == "FOLLOW_UP":
+                continue
+            if entry.difficulty.upper() != want_diff:
+                continue
+            if _norm(entry.question_text) in excluded:
+                continue
+            return entry
+        # Last resort: any non-duplicate, non-FOLLOW_UP entry (cross-difficulty)
+        # so a small bank can still satisfy interviews asking for >N questions
+        # of one difficulty instead of failing the whole interview.
+        for entry in self.entries:
+            if entry.question_type.upper() == "FOLLOW_UP":
+                continue
             if _norm(entry.question_text) in excluded:
                 continue
             return entry

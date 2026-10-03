@@ -20,8 +20,8 @@ def create_realtime_session(interview_id: uuid.UUID, request: Request, db: Sessi
 
     iv = __import__("app.interviews.service", fromlist=["get_user_interview"]).get_user_interview(db, interview_id, user.id)
     if str(iv.status) not in (InterviewStatus.IN_PROGRESS.value, InterviewStatus.WAITING_FOR_ANSWER.value, InterviewStatus.FOLLOW_UP_REQUIRED.value, InterviewStatus.EVALUATING.value):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=409, detail={"error": {"code": "REALTIME_NOT_AVAILABLE", "message": "Interview is not active."}})
+        from app.interviews.exceptions import InterviewNotActive
+        raise InterviewNotActive("Interview is not active.")
     row = db.query(RealtimeInterviewSession).filter_by(interview_id=iv.id, user_id=user.id, status="ACTIVE").one_or_none()
     if row is None:
         row = RealtimeInterviewSession(interview_id=iv.id, user_id=user.id, status="ACTIVE", started_at=datetime.now(timezone.utc))

@@ -58,17 +58,19 @@ class Settings(BaseSettings):
     NVIDIA_LLM_MODEL: str = ""
     NVIDIA_STT_MODEL: str = ""
     NVIDIA_TTS_MODEL: str = ""
-    NVIDIA_ASR_SERVER: str = "localhost:50051"
-    NVIDIA_TTS_SERVER: str = "localhost:50051"
+    NVIDIA_ASR_SERVER: str = "grpc.nvcf.nvidia.com:443"
+    NVIDIA_TTS_SERVER: str = "grpc.nvcf.nvidia.com:443"
+    NVIDIA_ASR_FUNCTION_ID: str = ""
+    NVIDIA_TTS_FUNCTION_ID: str = ""
     NVIDIA_TTS_VOICE: str = ""
-    NVIDIA_SPEECH_USE_SSL: bool = False
+    NVIDIA_SPEECH_USE_SSL: bool = True
     AI_TEMPERATURE: float = 0.2
-    AI_TIMEOUT_SECONDS: int = 60
+    AI_TIMEOUT_SECONDS: int = 120
     AI_MAX_RETRIES: int = 3
     AI_RETRY_BACKOFF_SECONDS: float = 1.5
     AI_MAX_RESUME_CHARS: int = 4000
     AI_MAX_ANSWER_CHARS: int = 12000
-    AI_MAX_OUTPUT_TOKENS: int = 1500
+    AI_MAX_OUTPUT_TOKENS: int = 4096
 
     # --- Rate limiting ---
     RATE_LIMIT_DEFAULT: str = "100/minute"

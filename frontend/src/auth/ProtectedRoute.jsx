@@ -1,5 +1,5 @@
 import { Navigate, useLocation } from "react-router-dom";
-import { useAuth } from "./AuthContext";
+import { useAuth } from "./useAuth";
 
 /** Unauthenticated users never reach protected pages; session is
  * reconstructed from the backend (cookie refresh) on every full load. */

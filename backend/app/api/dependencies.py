@@ -3,9 +3,12 @@
 import uuid
 
 from fastapi import Depends, Header, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
+
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def get_request_id(request: Request, x_request_id: str | None = Header(default=None, alias="X-Request-ID")) -> str:
@@ -23,15 +26,18 @@ def rate_limit_guard(request: Request, scope: str = "default") -> None:
     return None
 
 
-def get_current_user(db: Session = Depends(get_db), authorization: str | None = Header(default=None)) -> object:
+def get_current_user(
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> object:
     from app.auth.exceptions import InvalidCredentials
     from app.auth.service import decode_access_token
     from app.core.config import get_settings
     from app.models.user import User
 
-    if not authorization or not authorization.lower().startswith("bearer "):
+    if credentials is None:
         raise HTTPException(status_code=401, detail={"error": {"code": "UNAUTHENTICATED", "message": "Missing bearer token."}})
-    token = authorization.split(" ", 1)[1].strip()
+    token = credentials.credentials
     try:
         user_id = decode_access_token(token, secret=get_settings().SECRET_KEY)
     except InvalidCredentials:

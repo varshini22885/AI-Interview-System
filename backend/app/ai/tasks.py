@@ -17,7 +17,22 @@ def get_celery_app():
         task_serializer="json",
         accept_content=["json"],
         result_serializer="json",
-        task_time_limit=settings.AI_TIMEOUT_SECONDS + 60,
+        task_time_limit=settings.AI_TIMEOUT_SECONDS + 120,
+        redis_socket_keepalive=True,
+        redis_socket_timeout=30,
+        redis_retry_on_timeout=True,
+        broker_transport_options={
+            "socket_keepalive": True,
+            "socket_timeout": 30,
+            "socket_connect_timeout": 30,
+            "retry_on_timeout": True,
+        },
+        result_backend_transport_options={
+            "socket_keepalive": True,
+            "socket_timeout": 30,
+            "socket_connect_timeout": 30,
+            "retry_on_timeout": True,
+        },
     )
     return app
 

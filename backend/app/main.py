@@ -57,10 +57,10 @@ def create_app() -> FastAPI:
 
         test_database = settings.DATABASE_URL.startswith("sqlite") and settings.APP_ENV != "production"
         database = "ok"
-        redis = "ok"
+        redis_status = "ok"
         if test_database:
             database = "test-double"
-            redis = "test-double"
+            redis_status = "test-double"
         else:
             try:
                 from app.db.base import get_engine
@@ -73,10 +73,11 @@ def create_app() -> FastAPI:
                 import redis
 
                 redis.Redis.from_url(settings.REDIS_URL, socket_connect_timeout=1, socket_timeout=1).ping()
+                redis_status = "ok"
             except Exception:
-                redis = "unavailable"
-        dependencies_ok = database in ("ok", "test-double") and redis in ("ok", "test-double")
-        body = {"status": "ok" if dependencies_ok else "degraded", "database": database, "redis": redis, "ai_provider": settings.AI_PROVIDER}
+                redis_status = "unavailable"
+        dependencies_ok = database in ("ok", "test-double") and redis_status in ("ok", "test-double")
+        body = {"status": "ok" if dependencies_ok else "degraded", "database": database, "redis": redis_status, "ai_provider": settings.AI_PROVIDER}
         if body["status"] != "ok":
             raise HTTPException(status_code=503, detail=body)
         return body

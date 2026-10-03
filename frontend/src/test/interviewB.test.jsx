@@ -47,6 +47,41 @@ describe("interview async states", () => {
     expect(screen.queryByText(/\/10/)).not.toBeInTheDocument();
   });
 
+  it("binds an early camera stream to the preview once the interview data arrives", async () => {
+    // Regression: the stream is acquired on mount, but the interview markup
+    // (including <video>) only mounts after the interview query resolves. On a
+    // cold load the stream therefore exists before the element; the page must
+    // still bind it, otherwise the preview stays blank while the UI says
+    // "Camera On" (observed on refresh in the browser E2E run).
+    const stream = { getTracks: () => [{ kind: "video", stop() {} }, { kind: "audio", stop() {} }] };
+    const original = navigator.mediaDevices;
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: () => Promise.resolve(stream) },
+    });
+    try {
+      stubBackend(async (u) => {
+        if (u.endsWith(`/interviews/${interviewId}`)) {
+          // Delay the payload so the camera stream is always resolved first.
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          return jsonResponse({ id: interviewId, status: "WAITING_FOR_ANSWER", started_at: new Date().toISOString() });
+        }
+        if (u.endsWith(`/interviews/${interviewId}/current`)) return jsonResponse(currentPayload());
+        if (u.endsWith(`/interviews/${interviewId}/transcript`)) return jsonResponse([]);
+        return jsonResponse({}, { status: 404 });
+      });
+      renderInterview();
+
+      await waitFor(() => {
+        const video = document.querySelector(".candidate-video-card video");
+        expect(video).toBeTruthy();
+        expect(video.srcObject).toBe(stream);
+      });
+    } finally {
+      Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: original });
+    }
+  });
+
   it("routes terminal COMPLETED interviews onward", async () => {
     stubBackend((u) => {
       if (u.endsWith(`/interviews/${interviewId}`)) return jsonResponse({ id: interviewId, status: "COMPLETED" });

@@ -45,6 +45,13 @@ export default function LobbyPage() {
     }
   }
 
+  // Retry never fabricates success: it re-reads the server-authoritative
+  // status. If the backend still reports FAILED, the state stays FAILED.
+  function onRetryStatus() {
+    setStartError(null);
+    interviewQuery.refetch();
+  }
+
   return (
     <div className="app-page dark-page">
       <TopBar title="Interview Lobby" dark />
@@ -58,14 +65,26 @@ export default function LobbyPage() {
 
         {status === "FAILED" ? (
           <>
-            <span className="live-label" role="alert">
+            <span className="live-label live-label-failed" role="alert">
               ● PREPARATION FAILED
             </span>
-            <h1>We could not prepare this interview.</h1>
-            <p>Please create a new interview from the setup page.</p>
-            <button className="main-button" type="button" onClick={() => navigate("/setup")}>
-              Back to Setup
-            </button>
+            <h1>Preparation Failed</h1>
+            <p>
+              The interview service reported this session as failed while generating questions, so there is nothing to
+              practise yet.
+            </p>
+            <p className="lobby-note">
+              The failure happened on the server. Retrying only re-checks the session status — start over from setup for a
+              fresh attempt.
+            </p>
+            <div className="lobby-failure-actions">
+              <button className="main-button" type="button" onClick={onRetryStatus} disabled={interviewQuery.isFetching} aria-busy={interviewQuery.isFetching}>
+                {interviewQuery.isFetching ? "Checking status…" : "Retry"}
+              </button>
+              <button className="secondary-button" type="button" onClick={() => navigate("/setup")}>
+                Back to Setup
+              </button>
+            </div>
           </>
         ) : status === "CREATED" || status === "PREPARING" ? (
           <>
@@ -75,10 +94,15 @@ export default function LobbyPage() {
             <h1>Preparing your interview…</h1>
             <p>Questions are being generated for your target role. This page updates automatically.</p>
             {timedOut ? (
-              <p role="alert">
-                Preparation is taking longer than expected. You can wait a little longer or go back and create a new
-                interview.
-              </p>
+              <>
+                <p className="lobby-note" role="alert">
+                  Preparation is taking longer than expected. You can wait a little longer, re-check the status, or create a
+                  new interview.
+                </p>
+                <button className="secondary-button" type="button" onClick={onRetryStatus} disabled={interviewQuery.isFetching}>
+                  {interviewQuery.isFetching ? "Checking…" : "Check status"}
+                </button>
+              </>
             ) : null}
           </>
         ) : status === "READY" ? (
@@ -106,7 +130,7 @@ export default function LobbyPage() {
           </>
         ) : null}
 
-        {interview && status !== "FAILED" ? (
+        {interview ? (
           <div className="lobby-details">
             <div>
               <small>ROLE</small>

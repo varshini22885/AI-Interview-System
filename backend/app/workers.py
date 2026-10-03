@@ -8,6 +8,7 @@ the interview service/state machine.
 
 import uuid
 import json
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -15,12 +16,14 @@ from sqlalchemy import select
 from app.ai.evaluation_service import AnswerEvaluationService, EvaluationRequest
 from app.ai.followup_service import FollowUpRequest, FollowUpService
 from app.ai.question_service import QuestionGenerationService, QuestionRequest
-from app.db.base import SessionLocal
+from app.db.base import get_session_factory
 from app.evaluations.scoring import report_scores
 from app.interviews import service as svc
 from app.models.interview import Answer, AnswerEvaluation, Interview, InterviewFollowUp, InterviewQuestion, InterviewStatus, PerformanceReport
 from app.models.resume import Resume, ResumeAnalysis
 from app.storage import get_storage
+
+logger = logging.getLogger(__name__)
 
 
 def _latest_resume_summary(db, interview: Interview) -> str:
@@ -48,7 +51,7 @@ def _extract_resume_text(data: bytes, filename: str) -> str:
 
 
 def process_resume_work(*, resume_id) -> None:
-    db = SessionLocal()
+    db = get_session_factory()()
     try:
         resume = db.get(Resume, _as_uuid(resume_id))
         if resume is None:
@@ -87,23 +90,63 @@ def _as_uuid(value):
 def generate_questions_work(*, interview_id) -> None:
     from app.ai.provider import get_provider
 
-    db = SessionLocal()
+    db = get_session_factory()()
     try:
         interview = db.execute(select(Interview).where(Interview.id == _as_uuid(interview_id)).with_for_update()).scalar_one_or_none()
         if interview is None:
             return
+
+        # Idempotency guard 1: only run when interview is still in PREPARING state.
+        # If a previous task attempt already failed and set status=FAILED, we must
+        # not proceed: mark_ready() would reject a non-PREPARING interview, and the
+        # exception handler would then try FAILED->FAILED (blocked by the state
+        # machine), leaving the interview permanently stuck.
+        if str(interview.status) != InterviewStatus.PREPARING.value:
+            return
+
         user_id = interview.user_id
-        asked: list[str] = []
         gen = QuestionGenerationService(provider=get_provider())
         resume_summary = _latest_resume_summary(db, interview)
         count = int(interview.total_questions)
-        for i in range(count):
+
+        # Idempotency guard 2: count questions that were already committed by a
+        # previous partial run (e.g. the task crashed after db.commit() but before
+        # mark_ready()). Re-use them instead of generating duplicates.
+        from sqlalchemy import func as _func
+        existing_count = db.scalar(
+            select(_func.count()).select_from(InterviewQuestion).where(InterviewQuestion.interview_id == interview.id)
+        ) or 0
+
+        if existing_count >= count:
+            if str(interview.status) == InterviewStatus.PREPARING.value:
+                db.commit()
+                svc.mark_ready(db, user_id=user_id, interview_id=interview.id)
+            return
+
+        # Build the list of already-asked questions to avoid duplicates in the
+        # AI prompt when resuming a partial run.
+        from sqlalchemy import asc as _asc
+        already = db.execute(
+            select(InterviewQuestion.question_text)
+            .where(InterviewQuestion.interview_id == interview.id)
+            .order_by(_asc(InterviewQuestion.order_index))
+        ).scalars().all()
+        asked: list[str] = list(already)
+
+        # Continue ordering from the existing maximum/order count to guarantee unique order_index
+        max_order = db.scalar(
+            select(_func.max(InterviewQuestion.order_index)).where(InterviewQuestion.interview_id == interview.id)
+        )
+        next_order_index = (max_order + 1) if max_order is not None else 0
+        remaining = count - existing_count
+
+        for _ in range(remaining):
             req = QuestionRequest(
                 role=interview.target_role,
                 language=interview.programming_language,
-                interview_type=str(interview.interview_type),
-                difficulty=str(interview.difficulty),
-                persona=str(interview.interviewer_persona),
+                interview_type=getattr(interview.interview_type, "value", interview.interview_type),
+                difficulty=getattr(interview.difficulty, "value", interview.difficulty),
+                persona=getattr(interview.interviewer_persona, "value", interview.interviewer_persona),
                 resume_summary=resume_summary,
                 asked_questions=asked,
                 count=1,
@@ -112,7 +155,7 @@ def generate_questions_work(*, interview_id) -> None:
             db.add(
                 InterviewQuestion(
                     interview_id=interview.id,
-                    order_index=i,
+                    order_index=next_order_index,
                     question_type=gen_q.output.question_type,
                     question_text=gen_q.output.question_text,
                     question_metadata={
@@ -129,13 +172,20 @@ def generate_questions_work(*, interview_id) -> None:
                 )
             )
             asked.append(gen_q.output.question_text)
+            next_order_index += 1
+
         db.commit()
-        svc.mark_ready(db, user_id=user_id, interview_id=interview.id)
+        interview = db.get(Interview, interview.id)
+        if interview is not None and str(interview.status) == InterviewStatus.PREPARING.value:
+            svc.mark_ready(db, user_id=user_id, interview_id=interview.id)
     except Exception:
         db.rollback()
         try:
             interview = db.get(Interview, _as_uuid(interview_id))
-            if interview is not None and str(interview.status) != InterviewStatus.FAILED.value:
+            if interview is not None and str(interview.status) not in (
+                InterviewStatus.FAILED.value,
+                InterviewStatus.READY.value,
+            ):
                 svc.fail_interview(db, user_id=interview.user_id, interview_id=interview.id)
         except Exception:
             db.rollback()
@@ -147,7 +197,7 @@ def generate_questions_work(*, interview_id) -> None:
 def evaluate_answer_work(*, interview_id, question_id, answer_id) -> None:
     from app.ai.provider import get_provider
 
-    db = SessionLocal()
+    db = get_session_factory()()
     try:
         interview = db.execute(select(Interview).where(Interview.id == _as_uuid(interview_id)).with_for_update()).scalar_one_or_none()
         question = db.get(InterviewQuestion, _as_uuid(question_id))
@@ -206,29 +256,33 @@ def evaluate_answer_work(*, interview_id, question_id, answer_id) -> None:
         can_follow = bool(meta.get("follow_up_allowed", True))
         max_follow_ups = int(meta.get("max_follow_ups", 1) or 1)
         prior = [f.follow_up_text for f in (question.follow_ups or [])]
-        decision = FollowUpService(provider=provider).decide(
-            FollowUpRequest(
-                question_text=question.question_text,
-                answer_text=answer.answer_text,
-                missing_concepts=list(d.missing_concepts),
-                incorrect_concepts=list(d.incorrect_concepts),
-                difficulty=str(interview.difficulty),
-                persona=str(interview.interviewer_persona),
-                prior_follow_ups=prior,
-                max_follow_ups=max_follow_ups,
-            )
-        )
-        needs_follow_up = bool(can_follow and decision.output.follow_up_required)
-        if needs_follow_up and not db.query(InterviewFollowUp).filter_by(parent_question_id=question.id, triggering_answer_id=answer.id).one_or_none():
-            db.add(
-                InterviewFollowUp(
-                    parent_question_id=question.id,
-                    triggering_answer_id=answer.id,
-                    follow_up_text=decision.output.question_text,
-                    reason=decision.output.reason,
-                    follow_up_metadata={"target_concept": decision.output.target_concept, "difficulty": decision.output.difficulty},
+        try:
+            decision = FollowUpService(provider=provider).decide(
+                FollowUpRequest(
+                    question_text=question.question_text,
+                    answer_text=answer.answer_text,
+                    missing_concepts=list(d.missing_concepts),
+                    incorrect_concepts=list(d.incorrect_concepts),
+                    difficulty=str(interview.difficulty),
+                    persona=str(interview.interviewer_persona),
+                    prior_follow_ups=prior,
+                    max_follow_ups=max_follow_ups,
                 )
             )
+            needs_follow_up = bool(can_follow and decision.output.follow_up_required)
+            if needs_follow_up and not db.query(InterviewFollowUp).filter_by(parent_question_id=question.id, triggering_answer_id=answer.id).one_or_none():
+                db.add(
+                    InterviewFollowUp(
+                        parent_question_id=question.id,
+                        triggering_answer_id=answer.id,
+                        follow_up_text=decision.output.question_text,
+                        reason=decision.output.reason,
+                        follow_up_metadata={"target_concept": decision.output.target_concept, "difficulty": decision.output.difficulty},
+                    )
+                )
+        except Exception as e:
+            logger.warning("Follow-up decision failed or rejected (%s); proceeding without follow-up.", e)
+            needs_follow_up = False
         db.flush()
         svc.advance_after_evaluation(db, user_id=user_id, interview_id=interview.id, needs_follow_up=needs_follow_up)
         if not needs_follow_up:
@@ -249,7 +303,7 @@ def evaluate_answer_work(*, interview_id, question_id, answer_id) -> None:
 def generate_report_work(*, interview_id) -> None:
     from app.ai.provider import get_provider
 
-    db = SessionLocal()
+    db = get_session_factory()()
     try:
         iv_id = _as_uuid(interview_id)
         interview = db.get(Interview, iv_id)

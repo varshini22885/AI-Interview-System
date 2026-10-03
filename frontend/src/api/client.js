@@ -5,6 +5,9 @@
  * - Access token lives in memory ONLY. Refresh token stays in the backend's
  *   HttpOnly cookie; the JSON refresh_token field is intentionally discarded.
  * - 401 => single-flight refresh => one retry of the original request.
+ * - Only a *definitive* refresh rejection (401/403 from /auth/refresh) ends the
+ *   session; a transient failure (network error / 5xx) is retried once and must
+ *   never log the user out in the middle of an interview.
  * - Never logs tokens, resume contents, or answers.
  */
 
@@ -30,6 +33,17 @@ export function setToken(token) {
 
 export function clearToken() {
   accessToken = null;
+}
+
+/**
+ * Read-only view of the in-memory access token.
+ *
+ * The browser WebSocket API cannot send an Authorization header, so the
+ * realtime transport authenticates with the documented `access_token` query
+ * parameter and needs the current token. The value is never logged.
+ */
+export function getAccessToken() {
+  return accessToken;
 }
 
 export function setUnauthorizedHandler(handler) {
@@ -59,22 +73,59 @@ function toApiError(body, status) {
   );
 }
 
-/** Try to rotate the refresh cookie into a new in-memory access token. */
-async function tryRefresh() {
+/**
+ * A refresh failure is "transient" when the session was not actually rejected:
+ * the request never reached the backend (network error) or the backend/gateway
+ * could not answer (5xx). Observed in the browser E2E run: the Vite dev proxy
+ * returns 500 when its upstream socket blips mid-interview, which must not be
+ * mistaken for an expired session.
+ */
+function isTransientRefreshFailure(status) {
+  return status === 0 || status === 429 || status >= 500;
+}
+
+/** Statuses that mean the refresh cookie itself was rejected (session is over). */
+function isDefinitiveAuthFailure(status) {
+  return status === 401 || status === 403;
+}
+
+const REFRESH_RETRY_DELAY_MS = 250;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Rotate the refresh cookie into a new in-memory access token (single-flight,
+ * one retry on transient infrastructure failures).
+ * @returns {Promise<{ok: boolean, transient: boolean, status: number}>} `ok` = a fresh
+ * access token is in memory; `transient` = the outcome is unknown (do NOT end the session).
+ */
+async function refreshSession() {
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = (async () => {
-    try {
-      const response = await fetch(`${BASE_URL}/auth/refresh`, {
-        method: "POST",
-        credentials: "include",
-      });
-      if (!response.ok) return false;
-      const data = await response.json();
-      // data.refresh_token is intentionally NOT stored or logged.
-      accessToken = data.access_token || null;
-      return Boolean(accessToken);
-    } catch {
-      return false;
+    for (let attempt = 0; ; attempt += 1) {
+      let status = 0;
+      try {
+        const response = await fetch(`${BASE_URL}/auth/refresh`, {
+          method: "POST",
+          credentials: "include",
+        });
+        status = response.status;
+        if (response.ok) {
+          const data = await response.json();
+          // data.refresh_token is intentionally NOT stored or logged.
+          accessToken = data.access_token || null;
+          return { ok: Boolean(accessToken), transient: false, status };
+        }
+      } catch {
+        status = 0;
+      }
+      if (attempt === 0 && isTransientRefreshFailure(status)) {
+        await sleep(REFRESH_RETRY_DELAY_MS);
+        continue;
+      }
+      return { ok: false, transient: isTransientRefreshFailure(status), status };
     }
   })();
   try {
@@ -82,6 +133,12 @@ async function tryRefresh() {
   } finally {
     refreshInFlight = null;
   }
+}
+
+/** Try to rotate the refresh cookie into a new in-memory access token. */
+async function tryRefresh() {
+  const result = await refreshSession();
+  return result.ok;
 }
 
 /** Restore a session from the refresh cookie (used on app boot). */
@@ -109,11 +166,14 @@ async function request(path, { method = "GET", body, formData, headers = {}, ret
   }
 
   if (response.status === 401 && retry && !AUTH_BYPASS.some((p) => path.startsWith(p))) {
-    const refreshed = await tryRefresh();
-    if (refreshed) {
+    const refreshed = await refreshSession();
+    if (refreshed.ok) {
       return request(path, { method, body, formData, headers, retry: false });
     }
-    notifyUnauthorized();
+    // Only a definitive rejection (401/403) means the session is over. A transient
+    // failure (network error / 5xx / 429) leaves the refresh cookie untouched, so
+    // the session is preserved instead of logging the user out mid-interview.
+    if (isDefinitiveAuthFailure(refreshed.status)) notifyUnauthorized();
   }
 
   if (!response.ok) {

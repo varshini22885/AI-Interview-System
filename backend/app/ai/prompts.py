@@ -38,7 +38,7 @@ def _diff(d: DifficultyLevel | str) -> str:
 
 def build_question_prompt(*, role: str, language: str | None, interview_type: str, difficulty, persona, resume_summary: str, asked: list[str], count: int) -> str:
     asked_block = "\n".join(f"- {q[:160]}" for q in asked) or "(none)"
-    lang_line = f"Language constraint: {language}. Language-specific technical questions MUST use {language}." if language else "No language constraint."
+    lang_line = f"Language constraint: {language}. Language-specific technical questions MUST explicitly mention and focus on {language} in question_text and skill." if language else "No language constraint."
     return (
         f"SYSTEM: You generate interview questions. v1.\nROLE: interviewer ({persona}). Style: {_persona(persona)}\n"
         f"TASK: Generate {count} question(s) for role {role}. Type: {interview_type}. Difficulty: {difficulty} ({_diff(difficulty)}).\n"

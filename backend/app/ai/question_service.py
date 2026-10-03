@@ -36,13 +36,23 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+def _norm_enum(value) -> str:
+    """Upper-cased enum value; tolerant of legacy 'InterviewType.TECHNICAL' strings."""
+    raw = getattr(value, "value", value)
+    text = str(raw).upper() if raw is not None else ""
+    # Legacy py3.10 str(Enum) form e.g. 'INTERVIEWTYPE.TECHNICAL' -> 'TECHNICAL'.
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text
+
+
 def validate_question(candidate: QuestionOutput, req: QuestionRequest) -> None:
     text = candidate.question_text.strip()
     if len(text) < 10 or len(text) > MAX_Q_LEN:
         raise AIQuestionRejected("Bad question length")
-    if candidate.difficulty != req.difficulty:
+    if _norm_enum(candidate.difficulty) != _norm_enum(req.difficulty):
         raise AIQuestionRejected("Difficulty mismatch")
-    if req.interview_type != "MIXED" and candidate.question_type != req.interview_type:
+    if _norm_enum(req.interview_type) != "MIXED" and _norm_enum(candidate.question_type) != _norm_enum(req.interview_type):
         raise AIQuestionRejected("Interview-type mismatch")
     if not candidate.expected_concepts or not candidate.evaluation_rubric.strip():
         raise AIQuestionRejected("Missing concepts/rubric")
@@ -79,7 +89,7 @@ class QuestionGenerationService:
         settings = get_settings()
         if req.count < 1 or req.count > 5:
             raise AIQuestionRejected("count must be 1-5")
-        prompt = build_question_prompt(role=req.role, language=req.language, interview_type=req.interview_type, difficulty=req.difficulty, persona=req.persona, resume_summary=req.resume_summary[: settings.AI_MAX_RESUME_CHARS], asked=req.asked_questions, count=1)
+        prompt = build_question_prompt(role=req.role, language=req.language, interview_type=_norm_enum(req.interview_type) or "MIXED", difficulty=_norm_enum(req.difficulty) or "MEDIUM", persona=req.persona, resume_summary=req.resume_summary[: settings.AI_MAX_RESUME_CHARS], asked=req.asked_questions, count=1)
 
         def _call():
             result = self._provider().generate_question(prompt, schema=QuestionOutput)
@@ -90,8 +100,18 @@ class QuestionGenerationService:
             result, attempts = run_with_retries("generate_question", _call, max_attempts=settings.AI_MAX_RETRIES)
             return GeneratedQuestion(output=result.data, source="ai", attempts=attempts)
         except Exception:
+            # Deterministic safety net: the bank uses progressively relaxed
+            # matching (language, then type, then difficulty) so a small bank
+            # or an over-strict vendor response can never wedge the interview
+            # in PREPARING. Relaxed bank entries intentionally skip
+            # validate_question (their type/difficulty/language may differ)
+            # but must still satisfy the schema's minimum quality bar.
             fallback = self.bank.find_one(role=req.role, language=req.language, interview_type=req.interview_type, difficulty=req.difficulty, exclude=req.asked_questions)
             if fallback is None:
                 raise AIFallbackExhausted("No valid fallback question")
-            validate_question(fallback, req)
+            text = (fallback.question_text or "").strip()
+            if len(text) < 10 or len(text) > MAX_Q_LEN:
+                raise AIFallbackExhausted("No valid fallback question")
+            if not fallback.expected_concepts or not (fallback.evaluation_rubric or "").strip():
+                raise AIFallbackExhausted("No valid fallback question")
             return GeneratedQuestion(output=fallback, source="bank", attempts=settings.AI_MAX_RETRIES)
