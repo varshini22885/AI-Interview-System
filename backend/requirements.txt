@@ -37,6 +37,9 @@ PyPDF2==3.0.1
 python-docx==1.1.2
 textract==1.6.5
 
+# WebM/Opus decoding for NVIDIA ASR (speech.py uses PyAV)
+av==17.1.0
+
 # Logging
 structlog==24.4.0
 

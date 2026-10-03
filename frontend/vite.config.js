@@ -8,6 +8,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
+      host: "0.0.0.0",
+      allowedHosts: true,
       proxy: {
         // Frontend business code only ever calls relative /api/v1 paths;
         // this proxy is the only place a backend host appears in dev.
